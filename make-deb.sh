@@ -16,7 +16,7 @@ trap 'rm -rf "$ROOT"' EXIT
 for f in bin/virgl_test_server libexec/virgl_render_server; do
   [ -f "$STAGE/$f" ] || { echo "tidak ada $STAGE/$f"; exit 1; }
 done
-ls "$STAGE"/lib/libvirglrenderer.so.1* >/dev/null 2>&1 || { echo "tidak ada libvirglrenderer di $STAGE/lib"; exit 1; }
+ls "$STAGE"/lib/libvirglrenderer.so* >/dev/null 2>&1 || { echo "tidak ada libvirglrenderer di $STAGE/lib"; exit 1; }
 file "$STAGE/bin/virgl_test_server" | grep -q aarch64 || { echo "binary bukan aarch64"; exit 1; }
 
 mkdir -p "$ROOT$OPT" "$ROOT$TP/bin" "$ROOT/DEBIAN"

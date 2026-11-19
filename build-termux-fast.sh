@@ -44,5 +44,5 @@ PKG_CONFIG_LIBDIR=/tmp/pc PKG_CONFIG_PATH=/tmp/pc meson setup build-fast \
   -Dplatforms=egl -Dvenus=true -Dcheck-gl-errors=false -Dtests=false
 ninja -C build-fast
 DESTDIR=$PWD/out ninja -C build-fast install
-"$TC/llvm-strip" --strip-unneeded out$TP/lib/libvirglrenderer.so.1.* out$TP/bin/virgl_test_server out$TP/libexec/virgl_render_server 2>/dev/null || true
+"$TC/llvm-strip" --strip-unneeded out$TP/lib/libvirglrenderer.so* out$TP/bin/virgl_test_server out$TP/libexec/virgl_render_server 2>/dev/null || true
 echo "Hasil: $PWD/out$TP"
