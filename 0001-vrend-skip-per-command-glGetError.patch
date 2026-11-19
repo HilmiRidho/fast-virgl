@@ -1,0 +1,37 @@
+--- a/src/vrend/vrend_renderer.c	2026-06-01 03:31:52.000000000 +0000
++++ b/src/vrend/vrend_renderer.c	2026-11-19 04:58:51.117811480 +0000
+@@ -7516,10 +7516,25 @@
+    return VIRGL_RESOURCE_FD_INVALID;
+ }
+ 
++/* glGetError() after every decoded command / transfer forces a CPU<->GPU
++ * round trip on many Android GLES drivers (Mali/Adreno) and is the main
++ * per-command overhead of the vtest path.  After renderer init it is skipped
++ * by default; set VIRGL_GL_ERROR_CHECK=1 to get the old behaviour back. */
++static bool vrend_skip_gl_error_check = false;
++
++static void vrend_init_gl_error_check_policy(void)
++{
++   const char *e = getenv("VIRGL_GL_ERROR_CHECK");
++   vrend_skip_gl_error_check = !(e && e[0] && e[0] != '0');
++}
++
+ bool vrend_check_no_error(struct vrend_context *ctx)
+ {
+    GLenum err;
+ 
++   if (vrend_skip_gl_error_check)
++      return true;
++
+    err = glGetError();
+    if (err == GL_NO_ERROR)
+       return true;
+@@ -7752,6 +7767,8 @@
+       goto cleanup_and_fail;
+    }
+ 
++   vrend_init_gl_error_check_policy();
++
+    if (!has_feature(feat_ubo)) {
+       virgl_error("Host context missing support for required extension ARB_uniform_buffer_object\n");
+       goto cleanup_and_fail;

@@ -1,0 +1,97 @@
+diff -u a/vtest/vtest_server.c b/vtest/vtest_server.c
+--- a/vtest/vtest_server.c	2026-11-19 05:00:54.236992433 +0000
++++ b/vtest/vtest_server.c	2026-11-19 05:04:10.925289550 +0000
+@@ -38,6 +38,8 @@
+ #include <fcntl.h>
+ #include <getopt.h>
+ #include <string.h>
++#include <time.h>
++#include <sys/resource.h>
+ 
+ #include "util.h"
+ #include "util/list.h"
+@@ -132,6 +134,41 @@
+ static int vtest_client_dispatch_commands(struct vtest_client *client);
+ 
+ 
++/* ---- low-latency tuning -------------------------------------------------
++ * VTEST_BUSY_POLL_US (default 0 = off): after waking up, spin on a zero-timeout
++ *   select() for up to this many microseconds (max 5000) before sleeping in a
++ *   blocking select().  Can hide the scheduler wake-up latency for back-to-back
++ *   commands and fence signals on phones whose idle CPUs are slow to wake, at
++ *   the cost of CPU/battery.  Try e.g. 200 and compare; it is not always a win.
++ * VTEST_NICE (default -8): best-effort setpriority() of the server (and the
++ *   threads/processes it creates later).  Silently ignored when not permitted.
++ *   Set to 0 to leave the priority alone.
++ */
++static long vtest_busy_poll_us = 0;
++
++static uint64_t vtest_now_ns(void)
++{
++   struct timespec ts;
++   clock_gettime(CLOCK_MONOTONIC, &ts);
++   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++}
++
++static void vtest_server_low_latency_init(void)
++{
++   const char *e = getenv("VTEST_BUSY_POLL_US");
++   if (e && *e) {
++      long v = strtol(e, NULL, 10);
++      vtest_busy_poll_us = v < 0 ? 0 : (v > 5000 ? 5000 : v);
++   }
++
++   int nice_val = -8;
++   e = getenv("VTEST_NICE");
++   if (e && *e)
++      nice_val = (int)strtol(e, NULL, 10);
++   if (nice_val != 0)
++      (void)setpriority(PRIO_PROCESS, 0, nice_val); /* best effort */
++}
++
+ int vtest_main(int argc, char **argv)
+ {
+ #ifdef __AFL_LOOP
+@@ -139,6 +176,7 @@
+ #endif
+ 
+    vtest_server_getenv();
++   vtest_server_low_latency_init();
+    vtest_server_parse_args(argc, argv);
+ 
+    list_inithead(&server.new_clients);
+@@ -467,10 +505,30 @@
+       exit(1);
+    }
+ 
+-   ret = select(max_fd + 1, &read_fds, NULL, NULL, NULL);
+-   if (ret < 0) {
+-      perror("Failed to select on socket!");
+-      exit(1);
++   ret = 0;
++   if (vtest_busy_poll_us > 0) {
++      fd_set spin_fds;
++      struct timeval tv;
++      const uint64_t deadline = vtest_now_ns() + (uint64_t)vtest_busy_poll_us * 1000u;
++
++      do {
++         spin_fds = read_fds;
++         tv.tv_sec = 0;
++         tv.tv_usec = 0;
++         ret = select(max_fd + 1, &spin_fds, NULL, NULL, &tv);
++      } while (ret == 0 && vtest_now_ns() < deadline);
++
++      if (ret > 0)
++         read_fds = spin_fds;
++   }
++
++   if (ret <= 0) {
++      /* nothing became ready while spinning (or the spin failed): sleep */
++      ret = select(max_fd + 1, &read_fds, NULL, NULL, NULL);
++      if (ret < 0) {
++         perror("Failed to select on socket!");
++         exit(1);
++      }
+    }
+ 
+    LIST_FOR_EACH_ENTRY(client, &server.active_clients, head) {

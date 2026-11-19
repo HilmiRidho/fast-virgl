@@ -1,0 +1,153 @@
+diff -u a/vtest/vtest_renderer.c b/vtest/vtest_renderer.c
+--- a/vtest/vtest_renderer.c	2026-06-01 03:31:52.000000000 +0000
++++ b/vtest/vtest_renderer.c	2026-11-19 05:01:15.473568811 +0000
+@@ -373,6 +373,39 @@
+    vtest_unref_sync(sync);
+ }
+ 
++/* Reusable scratch buffer: avoids a malloc()/free() (and, for big texture
++ * transfers, an mmap/munmap + page-fault storm) on every submit/transfer.
++ * The vtest server handles one command at a time per process, and the
++ * buffer is only used synchronously within a single command. */
++#define VTEST_SCRATCH_KEEP_MAX (32u * 1024u * 1024u)
++static void *vtest_scratch;
++static size_t vtest_scratch_size;
++
++static void *vtest_scratch_get(size_t size)
++{
++   void *p;
++
++   if (size > VTEST_SCRATCH_KEEP_MAX)
++      return malloc(size);
++
++   if (size > vtest_scratch_size) {
++      size_t new_size = size < 65536 ? 65536 : size;
++      p = realloc(vtest_scratch, new_size);
++      if (!p)
++         return NULL;
++      vtest_scratch = p;
++      vtest_scratch_size = new_size;
++   }
++   return vtest_scratch;
++}
++
++/* must be called with the same size that was passed to vtest_scratch_get() */
++static void vtest_scratch_put(void *p, size_t size)
++{
++   if (p && size > VTEST_SCRATCH_KEEP_MAX)
++      free(p);
++}
++
+ static int vtest_block_write(int fd, void *buf, int size)
+ {
+    char *ptr = buf;
+@@ -412,14 +445,21 @@
+       ptr += ret;
+    } while (left);
+ 
+-   if (getenv("VTEST_SAVE")) {
++   static int save_checked = 0;
++   static const char *save_path = NULL;
++   if (!save_checked) {
++      save_path = getenv("VTEST_SAVE");
++      save_checked = 1;
++   }
++
++   if (save_path) {
+       if (savefd == -1) {
+ #if defined (__FreeBSD__)
+-        savefd = open(getenv("VTEST_SAVE"),
++        savefd = open(save_path,
+                       O_CLOEXEC | O_CREAT | O_WRONLY | O_TRUNC | O_SYNC, S_IRUSR | S_IWUSR);
+ 
+ #else
+-        savefd = open(getenv("VTEST_SAVE"),
++        savefd = open(save_path,
+                       O_CLOEXEC | O_CREAT | O_WRONLY | O_TRUNC | O_DSYNC, S_IRUSR | S_IWUSR);
+ #endif
+          if (savefd == -1) {
+@@ -1476,20 +1516,20 @@
+       return -1;
+    }
+ 
+-   cbuf = malloc(length_dw * 4);
++   cbuf = vtest_scratch_get((size_t)length_dw * 4);
+    if (!cbuf) {
+       return -1;
+    }
+ 
+    ret = ctx->input->read(ctx->input, cbuf, length_dw * 4);
+    if (ret != (int)length_dw * 4) {
+-      free(cbuf);
++      vtest_scratch_put(cbuf, (size_t)length_dw * 4);
+       return -1;
+    }
+ 
+    ret = virgl_renderer_submit_cmd(cbuf, ctx->ctx_id, length_dw);
+ 
+-   free(cbuf);
++   vtest_scratch_put(cbuf, (size_t)length_dw * 4);
+    if (ret)
+       return -1;
+ 
+@@ -1582,7 +1622,7 @@
+ 
+    if (data_size) {
+       data_iov.iov_len = data_size;
+-      data_iov.iov_base = malloc(data_size);
++      data_iov.iov_base = vtest_scratch_get(data_size);
+       if (!data_iov.iov_base) {
+          return -ENOMEM;
+       }
+@@ -1614,7 +1654,7 @@
+       if (ret > 0)
+          ret = 0;
+ 
+-      free(data_iov.iov_base);
++      vtest_scratch_put(data_iov.iov_base, data_size);
+    }
+ 
+    return ret;
+@@ -1637,13 +1677,14 @@
+ 
+    if (data_size) {
+       data_iov.iov_len = data_size;
+-      data_iov.iov_base = malloc(data_size);
++      data_iov.iov_base = vtest_scratch_get(data_size);
+       if (!data_iov.iov_base) {
+          return -ENOMEM;
+       }
+ 
+       ret = ctx->input->read(ctx->input, data_iov.iov_base, data_iov.iov_len);
+       if (ret < 0) {
++         vtest_scratch_put(data_iov.iov_base, data_size);
+          return ret;
+       }
+    }
+@@ -1664,7 +1705,7 @@
+    }
+ 
+    if (data_size) {
+-      free(data_iov.iov_base);
++      vtest_scratch_put(data_iov.iov_base, data_size);
+    }
+ 
+    return ret;
+diff -u a/vtest/vtest_server.c b/vtest/vtest_server.c
+--- a/vtest/vtest_server.c	2026-06-01 03:31:52.000000000 +0000
++++ b/vtest/vtest_server.c	2026-11-19 05:00:54.236992433 +0000
+@@ -494,6 +494,14 @@
+          exit(1);
+       }
+ 
++      /* larger socket buffers => fewer context switches for big submits and
++       * texture uploads (best effort, errors ignored) */
++      {
++         int bufsz = 1024 * 1024;
++         setsockopt(new_fd, SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof(bufsz));
++         setsockopt(new_fd, SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof(bufsz));
++      }
++
+       if (vtest_server_add_client(new_fd, new_fd)) {
+          perror("Failed to add client.");
+          exit(1);
